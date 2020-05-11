@@ -32,7 +32,7 @@
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 7
+#define RELEASE 8
 
 #define TAC_TG_START 100
 #define TAC_TG_END 109
@@ -412,21 +412,6 @@ bool IsOptionPresent (int argc, char **argv, PCSTR arg)
 
 	return false;
 }
-
-#ifdef LINUX
-dword GetTickCount() 
-{
-	struct timeval now;
-	
-	gettimeofday(&now, NULL);
-
-	u64 ticks = (u64) now.tv_sec * 1000;
-	
-	ticks += now.tv_usec / 1000;
-	
-	return (DWORD) ticks;
-};
-#endif
 
 void trim (std::string &s) {
 
@@ -1194,7 +1179,7 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		node *n = findnode (nodeid, true);	// this will hit the time
 
-		n->salt = ((dword)rand() << 16) ^ GetTickCount();	// reasonably random salt for RPTK authentication
+		n->salt = ((dword)rand() << 16) ^ g_tick;	// reasonably random salt for RPTK authentication
 
 		n->addr = addr;
 
