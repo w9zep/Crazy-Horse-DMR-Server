@@ -1,0 +1,26 @@
+#build using: make -f makedmrd dmrd
+
+CDEBUG = 
+DEBUG_LINK = --strip-debug  
+
+COMPILER=g++
+CFLAGS = $(CDEBUG) -m32 -fno-for-scope -Wreturn-type -I/usr/include/mysql -I./crypto -O0 # -finstrument-functions
+
+_LDFLAGS = -o $@ $(CFLAGS) -L/usr/lib -L/usr/lib/mysql -lpthread  -Wl,-Map=$@.map
+LDFLAGS = ____pick_a_LDFLAGS____
+RSA_LDFLAGS =  $(_LDFLAGS)  -Xlinker $(DEBUG_LINK) --fatal-warnings    
+
+dmrd: dmrd.o dmrd.cpp dmrd.h makedmrd
+	$(COMPILER) dmrd.o $(RSA_LDFLAGS)  
+
+.SUFFIXES: .cpp
+
+.cpp.o:
+	echo .
+	rm -f out
+	$(COMPILER) $(CFLAGS) -c $< >&out
+	more out
+	echo .
+
+
+
