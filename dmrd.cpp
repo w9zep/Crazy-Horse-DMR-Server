@@ -32,7 +32,7 @@
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 8
+#define RELEASE 9
 
 #define TAC_TG_START 100
 #define TAC_TG_END 109
@@ -1365,6 +1365,7 @@ bool show_running_status()
 	if (sendto (sock, "/STAT", 5, 0, (sockaddr*)&addr, sizeof(addr)) == -1) {
 
 		printf ("sendto() failed (%d)\n", GetInetError());
+		CLOSESOCKET(sock);
 		return false;
 	}
 
