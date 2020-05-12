@@ -23,7 +23,8 @@
 
 	TODO 
 
-	Make it work for big endian CPUs.
+	save/restore database
+	Test on big endian CPU.
 	Test on 64-bit.
 	DoS mitigation.
 	
@@ -32,8 +33,9 @@
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 9
+#define RELEASE 10
 
+//#define BIG_ENDIAN_CPU
 #define TAC_TG_START 100
 #define TAC_TG_END 109
 #define SCANNER_TG 777
@@ -59,7 +61,6 @@ struct slot
 	struct node		*node;				// parent node
 	dword			slotid;
 	dword			tg;					// subscribed talkgroup else 0
-	bool			bPrivate;			// if true, tg is dmr ID of peer radio
 	slot			*prev, *next;		// talkgroup chain of subscribers
 	dword			parrotstart;		// parrot start time
 	int				parrotendcount;	
@@ -521,45 +522,35 @@ void log (PCSTR fmt, ...)
 	SetInetError (nerr);
 }
 
-word get2 (byte const *p)
+word inline get2 (byte const *p)
 {
-	// big endian
-
-	word n = (word) *p++ << 8;
-	
-	n += *p++;
-
-	return n;
+	// network order is big endian
+#ifdef BIG_ENDIAN_CPU
+	return *(word*) p;
+#else
+	return ((word)p[0] << 8) + p[1];
+#endif
 }
 
-dword get3 (byte const *p)
+dword inline get3 (byte const *p)
 {
-	// big endian
-
-	dword n = (dword) *p++ << 16;
-	n += (word) *p++ << 8;
-	n += *p++;
-
-	return n;
+	// network order is big endian
+	return (dword)p[0] << 16 | ((word)p[1] << 8) | p[2];
 }
 
-dword get4 (byte const *p)
+dword inline get4 (byte const *p)
 {
-	// big endian
-
-	dword n = (dword) *p++ << 24;
-	
-	n += (dword) *p++ << 16;
-	n += (word) *p++ << 8;
-	n += *p++;
-
-	return n;
+	// network order is big endian
+#ifdef BIG_ENDIAN_CPU
+	return *(dword*) p;
+#else
+	return (dword)p[0] << 24 | (dword)p[1] << 16 | (word)p[2] << 8 | p[3];
+#endif
 }
 
 void set3 (byte *p, dword n)
 {
-	// big endian
-
+	// network order is big endian
 	*p++ = n >> 16;
 	*p++ = n >> 8;
 	*p++ = n;
@@ -567,8 +558,7 @@ void set3 (byte *p, dword n)
 
 void set4 (byte *p, dword n)
 {
-	// big endian
-
+	// network order is big endian
 	*p++ = n >> 24;
 	*p++ = n >> 16;
 	*p++ = n >> 8;
@@ -779,13 +769,13 @@ void _dump_nodes(std::string &ret)
 
 		if (n->slots[0].tg) {
 
-			sprintf (temp, "  S1 TG %d Priv %d\n", n->slots[0].tg, n->slots[0].bPrivate);
+			sprintf (temp, "  S1 TG %d\n", n->slots[0].tg);
 			ret += temp;
 		}
 
 		if (n->slots[1].tg) {
 			
-			sprintf (temp, "  S2 TG %d Priv %d\n", n->slots[1].tg, n->slots[1].bPrivate);
+			sprintf (temp, "  S2 TG %d\n", n->slots[1].tg);
 			ret += temp;
 		}
 	}
@@ -1227,11 +1217,11 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 	else if (pksize == 302 && memcmp(pk, "RPTC", 4)==0) {		// node description stuff, like callsign and location
 
-		dword nodeid = *(dword*)(pk + 4);
+		dword nodeid = get4(pk + 4);
 
 		memcpy (pk, "RPTACK", 6);
 
-		*(dword*)(pk + 6) = nodeid;
+		set4(pk + 6, nodeid);
 
 		sendpacket (addr, pk, 10);
 	}
