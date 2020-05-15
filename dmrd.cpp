@@ -27,15 +27,27 @@
 	Test on big endian CPU.
 	Test on 64-bit.
 	DoS mitigation.
+
+	HISTORY
+
+	05-15-2020		Added BIG_MEMORY high speed node index support.
+					Big endian CPU support.
+					Version 0.11
+
 	
 */
 
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 10
+#define RELEASE 11
 
 //#define BIG_ENDIAN_CPU
+#define BIG_MEMORY 		/* for larger servers with plenty of memory - high performance - yowza! */
+#ifdef BIG_MEMORY
+	#define LOW_DMRID 100000
+	#define HIGH_DMRID 8000000
+#endif
 #define TAC_TG_START 100
 #define TAC_TG_END 109
 #define SCANNER_TG 777
@@ -91,6 +103,12 @@ typedef std::map <dword, node*> NODETREE ;  // the dword is the DMRID+ESSID
 NODETREE g_nodes;		
 
 typedef NODETREE::iterator NODETREE_ITERATOR;
+
+#ifdef BIG_MEMORY
+
+node * fast_node_index [HIGH_DMRID-LOW_DMRID];
+
+#endif
 
 // used for parrot processing
 
@@ -614,6 +632,16 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 {
 	nodeid = NODEID(nodeid);	// strip off possible slot
 
+#ifdef BIG_MEMORY
+
+	if (!inrange(nodeid,LOW_DMRID,HIGH_DMRID)) 
+		return NULL;
+
+	if (fast_node_index[nodeid-LOW_DMRID]) 
+		return fast_node_index[nodeid-LOW_DMRID];
+
+#endif
+
 	if (g_nodes.find(nodeid) == g_nodes.end()) {		// not in map?
 
 		if (bCreateIfNecessary) {
@@ -621,6 +649,10 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 			log ("New node %d\n", nodeid);
 
 			node *n = new node;
+
+#ifdef BIG_MEMORY
+			fast_node_index[nodeid-LOW_DMRID] = n;
+#endif
 
 			n->nodeid = nodeid;
 
@@ -692,6 +724,12 @@ void delete_node (dword nodeid)
 		g_nodes.erase (nodeid);
 
 		delete n;
+
+#ifdef BIG_MEMORY
+		if (inrange(nodeid,LOW_DMRID,HIGH_DMRID))	
+			fast_node_index[nodeid-LOW_DMRID] = NULL;
+#endif
+
 	}
 }
 
@@ -1275,7 +1313,7 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 void run ()
 {
-	unsigned int g_last_housekeeping_sec = 0;
+	dword g_last_housekeeping_sec = 0;
 
 	dword seq = 1;
 
