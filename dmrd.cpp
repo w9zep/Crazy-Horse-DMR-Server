@@ -45,12 +45,12 @@
 //#define BIG_ENDIAN_CPU
 #define BIG_MEMORY 		/* for larger servers with plenty of memory - high performance - yowza! */
 #ifdef BIG_MEMORY
-	#define LOW_DMRID 100000
-	#define HIGH_DMRID 8000000
+	#define LOW_DMRID 1000000		/* lowest acceptible DMR ID */
+	#define HIGH_DMRID 8000000		/* highest acceptible DMR ID */
 #endif
-#define TAC_TG_START 100
-#define TAC_TG_END 109
-#define SCANNER_TG 777
+#define TAC_TG_START 100			/* the first default TAC group to make */
+#define TAC_TG_END 109				/* the last default TAC group to make */
+#define SCANNER_TG 777				/* when radios connect to this, they head the 'scanner' */
 #define UNSUBSCRIBE_ALL_TG 4000
 #define MAX_PASSWORD_SIZE 120
 #define DEFAULT_HOUSEKEEPING_MINUTES 5
