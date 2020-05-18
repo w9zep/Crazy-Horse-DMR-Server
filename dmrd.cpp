@@ -30,24 +30,20 @@
 
 	HISTORY
 
-	05-15-2020		Added BIG_MEMORY high speed node index support.
-					Big endian CPU support.
-					Version 0.11
+	05-18-2020	major changes to findnode() and delete_node()
+				removed BIG_MEMORY switch, and assumes big memory.
+				version 0.16
 
-	
 */
 
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 11
+#define RELEASE 16
 
 //#define BIG_ENDIAN_CPU
-#define BIG_MEMORY 		/* for larger servers with plenty of memory - high performance - yowza! */
-#ifdef BIG_MEMORY
-	#define LOW_DMRID 1000000		/* lowest acceptible DMR ID */
-	#define HIGH_DMRID 8000000		/* highest acceptible DMR ID */
-#endif
+#define LOW_DMRID 1000000			/* lowest acceptible DMR ID not including ESSID */
+#define HIGH_DMRID 8000000			/* highest acceptible DMR ID not including ESSID */
 #define TAC_TG_START 100			/* the first default TAC group to make */
 #define TAC_TG_END 109				/* the last default TAC group to make */
 #define SCANNER_TG 777				/* when radios connect to this, they head the 'scanner' */
@@ -76,18 +72,18 @@ struct slot
 	slot			*prev, *next;		// talkgroup chain of subscribers
 	dword			parrotstart;		// parrot start time
 	int				parrotendcount;	
-	byte volatile	parrotseq;
 	memfile			*parrot;			// record parrot DMRD packets
+	byte volatile	parrotseq;
 };
 
 struct node			// e.g, a pistar node
 {
 	dword			nodeid;				// node ID
-	bool			bAuth;				// node has been authenticated
 	dword			salt;				// used for authentication
 	sockaddr_in		addr;				// last known IP address
 	dword			hitsec;				// last time heard
 	slot			slots[2];			// two slots
+	bool			bAuth;				// node has been authenticated
 
 	node() {
 
@@ -98,17 +94,17 @@ struct node			// e.g, a pistar node
 	}
 };
 
-typedef std::map <dword, node*> NODETREE ;  // the dword is the DMRID+ESSID
+struct nodevector {
 
-NODETREE g_nodes;		
+	struct node *sub[100];			// allocate for 100 ESSID
 
-typedef NODETREE::iterator NODETREE_ITERATOR;
+	nodevector() {
 
-#ifdef BIG_MEMORY
+		memset (this, 0, sizeof(*this));
+	}
+};
 
-node * fast_node_index [HIGH_DMRID-LOW_DMRID];
-
-#endif
+nodevector * node_index [HIGH_DMRID-LOW_DMRID];		// large array to point to nodevectors
 
 // used for parrot processing
 
@@ -566,7 +562,7 @@ dword inline get4 (byte const *p)
 #endif
 }
 
-void set3 (byte *p, dword n)
+void inline set3 (byte *p, dword n)
 {
 	// network order is big endian
 	*p++ = n >> 16;
@@ -574,7 +570,7 @@ void set3 (byte *p, dword n)
 	*p++ = n;
 }
 
-void set4 (byte *p, dword n)
+void inline set4 (byte *p, dword n)
 {
 	// network order is big endian
 	*p++ = n >> 24;
@@ -632,45 +628,112 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 {
 	nodeid = NODEID(nodeid);	// strip off possible slot
 
-#ifdef BIG_MEMORY
+	node *n = NULL;
 
-	if (!inrange(nodeid,LOW_DMRID,HIGH_DMRID)) 
-		return NULL;
+	int dmrid, essid;
 
-	if (fast_node_index[nodeid-LOW_DMRID]) 
-		return fast_node_index[nodeid-LOW_DMRID];
+	if (nodeid > 0xFFFFFF) {
 
-#endif
-
-	if (g_nodes.find(nodeid) == g_nodes.end()) {		// not in map?
-
-		if (bCreateIfNecessary) {
-
-			log ("New node %d\n", nodeid);
-
-			node *n = new node;
-
-#ifdef BIG_MEMORY
-			fast_node_index[nodeid-LOW_DMRID] = n;
-#endif
-
-			n->nodeid = nodeid;
-
-			n->slots[0].slotid = SLOTID(nodeid,0);
-			n->slots[1].slotid = SLOTID(nodeid,1);
-
-			g_nodes[nodeid] = n;
-		}
-
-		else
-			return NULL;
+		dmrid = nodeid / 100;
+		essid = nodeid % 100;
 	}
 
-	node *n = g_nodes[nodeid];
+	else {
+
+		dmrid = nodeid;
+		essid = 0;
+	}
+
+	if (!inrange(dmrid,LOW_DMRID,HIGH_DMRID)) 
+		return NULL;
+
+	int ix = dmrid-LOW_DMRID;
+
+	if (!node_index[ix]) {
+
+		node_index[ix] = new nodevector;
+	}
+
+ 	if (!node_index[ix]->sub[essid]) {
+
+		n = node_index[ix]->sub[essid] = new node;
+
+		n->nodeid = nodeid;
+
+		n->slots[0].slotid = SLOTID(nodeid,0);
+		n->slots[1].slotid = SLOTID(nodeid,1);
+	}
+
+	else {
+
+		n = node_index[ix]->sub[essid];
+	}
 
 	n->hitsec = g_sec;
 
 	return n;
+}
+
+void delete_node (dword nodeid)
+{
+	nodeid = NODEID(nodeid);	// strip off possible slot
+
+	node *n = NULL;
+
+	int dmrid, essid;
+
+	if (nodeid > 0xFFFFFF) {
+
+		dmrid = nodeid / 100;
+		essid = nodeid % 100;
+	}
+
+	else {
+
+		dmrid = nodeid;
+		essid = 0;
+	}
+
+	if (inrange(dmrid,LOW_DMRID,HIGH_DMRID)) {
+
+		int ix = dmrid-LOW_DMRID;
+
+		if (node_index[ix]) {
+
+			node *n = node_index[ix]->sub[essid];
+
+			if (n) {
+
+				log ("Delete node %d\n", nodeid);
+
+				unsubscribe_from_group (&n->slots[0]);
+
+				unsubscribe_from_group (&n->slots[1]);
+
+				delete n;
+
+				node_index[ix]->sub[essid] = NULL;
+
+				bool bNodes = false;
+
+				for (int i=0; i < 100; i++) {
+
+					if (node_index[ix]->sub[essid]) {
+
+						bNodes = true;
+						break;
+					}
+				}
+
+				if (!bNodes) {
+
+					delete node_index[ix];
+					
+					node_index[ix] = NULL;
+				}
+			}
+		}
+	}
 }
 
 slot * findslot (int slotid, bool bCreateIfNecessary)
@@ -705,32 +768,6 @@ radio * findradio (int radioid, bool bCreateIfNecessary)
 	radio *n = g_radios[radioid];
 
 	return n;
-}
-
-void delete_node (dword nodeid)
-{
-	node *n = findnode (nodeid, false);
-
-	// note: any radios associated with this node will be deleted by housekeeping
-
-	if (n) {
-
-		log ("Delete node %d\n", nodeid);
-
-		unsubscribe_from_group (&n->slots[0]);
-
-		unsubscribe_from_group (&n->slots[1]);
-
-		g_nodes.erase (nodeid);
-
-		delete n;
-
-#ifdef BIG_MEMORY
-		if (inrange(nodeid,LOW_DMRID,HIGH_DMRID))	
-			fast_node_index[nodeid-LOW_DMRID] = NULL;
-#endif
-
-	}
 }
 
 talkgroup * findgroup (dword tg, bool bCreateIfNecessary)
@@ -797,24 +834,37 @@ void _dump_nodes(std::string &ret)
 {
 	char temp[200];
 
-	for (NODETREE_ITERATOR itr = g_nodes.begin(); itr != g_nodes.end(); itr++) {
+	sprintf (temp, "Sec %d tick %u\n", g_sec, g_tick);
 
-		node const *n = (*itr).second;
+	ret += temp;
 
-		sprintf (temp, "%s ID %d auth %d\n", inet_ntoa(n->addr.sin_addr), n->nodeid, n->bAuth);
+	for (int ix=0; ix < HIGH_DMRID - LOW_DMRID; ix++) {
 
-		ret += temp;
+		if (node_index[ix]) {
 
-		if (n->slots[0].tg) {
+			for (int essid=0; essid < 100; essid++) {
 
-			sprintf (temp, "  S1 TG %d\n", n->slots[0].tg);
-			ret += temp;
-		}
+				node const *n = node_index[ix]->sub[essid];
 
-		if (n->slots[1].tg) {
-			
-			sprintf (temp, "  S2 TG %d\n", n->slots[1].tg);
-			ret += temp;
+				if (n) {
+
+					sprintf (temp, "%s ID %d auth %d sec %u\n", inet_ntoa(n->addr.sin_addr), n->nodeid, n->bAuth, n->hitsec);
+
+					ret += temp;
+
+					if (n->slots[0].tg) {
+
+						sprintf (temp, "  S1 TG %d\n", n->slots[0].tg);
+						ret += temp;
+					}
+
+					if (n->slots[1].tg) {
+						
+						sprintf (temp, "  S2 TG %d\n", n->slots[1].tg);
+						ret += temp;
+					}
+				}
+			}
 		}
 	}
 }
@@ -828,7 +878,6 @@ void dump_nodes()
 		puts (str.c_str());
 	}
 }
-
 
 void unsubscribe_from_group(slot *s)
 {
@@ -898,25 +947,30 @@ void do_housekeeping()
 
 	int active = 0, dropped_nodes = 0, radios = 0, dropped_radios = 0;
 
-	NODETREE_ITERATOR itr = g_nodes.begin(); 
-	
-	while (itr != g_nodes.end()) {
+	for (int ix=0; ix < HIGH_DMRID - LOW_DMRID; ix++) {
 
-		node *n = (*itr).second;
+		if (node_index[ix]) {
 
-		if (g_sec - n->hitsec >= 60) {		// node must at least ping once a minute
+			for (int essid=0; essid < 100; essid++) {
 
-			dropped_nodes ++;
+				node const *n = node_index[ix]->sub[essid];
 
-			delete_node (n->nodeid);
+				if (n) {
+
+					if (g_sec - n->hitsec >= 60) {		// node must at least ping once a minute
+
+						dropped_nodes ++;
+
+						delete_node (n->nodeid);
+					}
+
+					else {
+
+						active ++;
+					}
+				}
+			}
 		}
-
-		else {
-
-			active ++;
-		}
-
-		itr ++;
 	}
 
 	// delete orphan radios
@@ -960,8 +1014,9 @@ void swapbytes (byte *a, byte *b, int sz)
 		swap (*a++, *b++);
 }
 
-// Time thread. We don't use time() or any other time function in the C/C++ library because they are expensive.
-// This count does not need to be perfectly accurate.
+// Time thread. We don't use time() or any other time function in the C/C++ library for the "DMRD" packets
+// because they are expensive, and we want the highest performance.
+// This counter does not need to be perfectly accurate.
 
 PTHREAD_PROC(time_thread_proc) 
 {
@@ -1270,6 +1325,9 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		node *n = findnode (nodeid, false);	// this will hit the time
 
+		if (n) 
+			n->addr = addr;
+
 		if (!n || !n->bAuth) {
 
 			memcpy (pk, "MSTNAK", 6);
@@ -1279,7 +1337,6 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		else {
 
-			n->addr = addr;
 			memcpy (pk, "MSTPONG", 7);
 			set4 (pk+7, nodeid);
 			sendpacket (addr, pk, 11);
@@ -1435,6 +1492,10 @@ void process_config_file()
 		g_debug = c.getint("debug", "level", g_debug);
 		g_housekeeping_minutes = c.getint ("general","housekeeping_minutes", g_housekeeping_minutes);
 	}
+
+	printf ("Config: debug %d, port %d, password %s, housekeeping minutes %d nodesize %d\n\n",
+				g_debug, g_udp_port, g_password, g_housekeeping_minutes, sizeof(node));
+
 }
 
 int main(int argc, char **argv)
@@ -1444,18 +1505,6 @@ int main(int argc, char **argv)
 	puts ("\nCrazy Horse, Pi-Star Compatible (MMDVM Protcol) DMR Server");
 	printf ("Version %d.%02d (%s)\n", VERSION, RELEASE, __DATE__" "__TIME__);
 	puts ("(c) 2020 Michael J Wagner (W9ZEP)\n");
-
-#if 0
-	puts ("This program is free software: you can redistribute it and/or modify");
-    puts ("it under the terms of the GNU General Public License as published by");
-    puts ("the Free Software Foundation, version 3 of the License.\n");
-
-    puts ("This program is distributed in the hope that it will be useful,");
-    puts ("but WITHOUT ANY WARRANTY; without even the implied warranty of");
-    puts ("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the");
-    puts ("GNU General Public License for more details at");
-	puts ("https://www.gnu.org/licenses\n");
-#endif
 
 	if (IsOptionPresent(argc,argv,"--help"))
 		return 0;
@@ -1471,6 +1520,16 @@ int main(int argc, char **argv)
 
 	if (IsOptionPresent(argc,argv,"-s"))		// show running server's status, then exit?
 		return !show_running_status () ? 0 : 1;
+
+	puts ("This program is free software: you can redistribute it and/or modify");
+    puts ("it under the terms of the GNU General Public License as published by");
+    puts ("the Free Software Foundation, version 3 of the License.\n");
+
+    puts ("This program is distributed in the hope that it will be useful,");
+    puts ("but WITHOUT ANY WARRANTY; without even the implied warranty of");
+    puts ("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the");
+    puts ("GNU General Public License for more details at");
+	puts ("https://www.gnu.org/licenses\n");
 
 	// make the talkgroups
 
