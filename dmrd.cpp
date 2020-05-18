@@ -31,19 +31,23 @@
 	HISTORY
 
 	05-18-2020	major changes to findnode() and delete_node()
-				removed BIG_MEMORY switch, and assumes big memory.
-				version 0.16
+				assumes large memory server.
+				no longer using std::map for anything
+				node management optimized
+				private call optimized
+				version 0.17
 
 */
 
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 16
+#define RELEASE 17
 
 //#define BIG_ENDIAN_CPU
 #define LOW_DMRID 1000000			/* lowest acceptible DMR ID not including ESSID */
 #define HIGH_DMRID 8000000			/* highest acceptible DMR ID not including ESSID */
+#define MAX_TALK_GROUPS 10000		/* highest possible TG */
 #define TAC_TG_START 100			/* the first default TAC group to make */
 #define TAC_TG_END 109				/* the last default TAC group to make */
 #define SCANNER_TG 777				/* when radios connect to this, they head the 'scanner' */
@@ -78,7 +82,8 @@ struct slot
 
 struct node			// e.g, a pistar node
 {
-	dword			nodeid;				// node ID
+	dword			nodeid;				// full node ID with ESSID if present
+	dword			dmrid;				// node ID without ESSID. If no ESSID, then identical to nodeid
 	dword			salt;				// used for authentication
 	sockaddr_in		addr;				// last known IP address
 	dword			hitsec;				// last time heard
@@ -96,6 +101,8 @@ struct node			// e.g, a pistar node
 
 struct nodevector {
 
+	dword			radioslot;			// slot where the radio of the same dmrid was heard
+
 	struct node *sub[100];			// allocate for 100 ESSID
 
 	nodevector() {
@@ -104,7 +111,7 @@ struct nodevector {
 	}
 };
 
-nodevector * node_index [HIGH_DMRID-LOW_DMRID];		// large array to point to nodevectors
+nodevector * g_node_index [HIGH_DMRID-LOW_DMRID];		// large array to point to nodevectors
 
 // used for parrot processing
 
@@ -127,25 +134,6 @@ struct parrot_exec
 
 //////////////////////////////////////////////////////////////////////////////////////////
 
-struct radio
-{
-	dword		radioid;		// radio ID
-	dword		slotid;			// last heard on this slot
-
-	radio() {
-
-		radioid = slotid = 0;
-	}
-};
-
-typedef std::map <dword, radio*> RADIOTREE;  // the dword is the DMRID+ESSID
-
-RADIOTREE g_radios;		
-
-typedef RADIOTREE::iterator RADIOTREE_ITERATOR;
-
-//////////////////////////////////////////////////////////////////////////////////////////
-
 struct talkgroup
 {	
 	dword		tg;					// talk group #
@@ -162,11 +150,7 @@ struct talkgroup
 	}
 };
 
-typedef std::map <dword, talkgroup*> GROUPTREE ;  // the dword is the talkgroup #
-
-GROUPTREE g_groups;
-
-typedef GROUPTREE::iterator GROUPTREE_ITERATOR;
+talkgroup *g_talkgroups[MAX_TALK_GROUPS];
 
 talkgroup *g_scanner;		// the scanner TG
 
@@ -626,13 +610,13 @@ void sendpacket (sockaddr_in addr, void const *p, int sz)
 
 node * findnode (dword nodeid, bool bCreateIfNecessary)
 {
-	nodeid = NODEID(nodeid);	// strip off possible slot
-
 	node *n = NULL;
 
-	int dmrid, essid;
+	nodeid = NODEID(nodeid);	// strip off possible slot bit
 
-	if (nodeid > 0xFFFFFF) {
+	dword dmrid, essid;
+
+	if (nodeid > 0xFFFFFF) {	// has ESSID?
 
 		dmrid = nodeid / 100;
 		essid = nodeid % 100;
@@ -649,16 +633,17 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 
 	int ix = dmrid-LOW_DMRID;
 
-	if (!node_index[ix]) {
+	if (!g_node_index[ix]) {
 
-		node_index[ix] = new nodevector;
+		g_node_index[ix] = new nodevector;
 	}
 
- 	if (!node_index[ix]->sub[essid]) {
+ 	if (!g_node_index[ix]->sub[essid]) {
 
-		n = node_index[ix]->sub[essid] = new node;
+		n = g_node_index[ix]->sub[essid] = new node;
 
 		n->nodeid = nodeid;
+		n->dmrid = dmrid;
 
 		n->slots[0].slotid = SLOTID(nodeid,0);
 		n->slots[1].slotid = SLOTID(nodeid,1);
@@ -666,7 +651,7 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 
 	else {
 
-		n = node_index[ix]->sub[essid];
+		n = g_node_index[ix]->sub[essid];
 	}
 
 	n->hitsec = g_sec;
@@ -698,9 +683,9 @@ void delete_node (dword nodeid)
 
 		int ix = dmrid-LOW_DMRID;
 
-		if (node_index[ix]) {
+		if (g_node_index[ix]) {
 
-			node *n = node_index[ix]->sub[essid];
+			node *n = g_node_index[ix]->sub[essid];
 
 			if (n) {
 
@@ -712,13 +697,13 @@ void delete_node (dword nodeid)
 
 				delete n;
 
-				node_index[ix]->sub[essid] = NULL;
+				g_node_index[ix]->sub[essid] = NULL;
 
 				bool bNodes = false;
 
 				for (int i=0; i < 100; i++) {
 
-					if (node_index[ix]->sub[essid]) {
+					if (g_node_index[ix]->sub[essid]) {
 
 						bNodes = true;
 						break;
@@ -727,9 +712,9 @@ void delete_node (dword nodeid)
 
 				if (!bNodes) {
 
-					delete node_index[ix];
+					delete g_node_index[ix];
 					
-					node_index[ix] = NULL;
+					g_node_index[ix] = NULL;
 				}
 			}
 		}
@@ -746,62 +731,28 @@ slot * findslot (int slotid, bool bCreateIfNecessary)
 	return &n->slots[SLOT(slotid)];
 }
 
-radio * findradio (int radioid, bool bCreateIfNecessary)
-{
-	if (g_radios.find(radioid) == g_radios.end()) {		// not in map?
-
-		if (bCreateIfNecessary) {
-
-			log ("New radio %d\n", radioid);
-
-			radio *n = new radio;
-
-			n->radioid = radioid;
-
-			g_radios[radioid] = n;
-		}
-
-		else
-			return NULL;
-	}
-
-	radio *n = g_radios[radioid];
-
-	return n;
-}
-
 talkgroup * findgroup (dword tg, bool bCreateIfNecessary)
 {
-	if (!tg)		// tg 0 not allowed
-		return false;
+	if (!inrange(tg,1,MAX_TALK_GROUPS-1))
+		return NULL;
 
-	if (g_groups.find(tg) == g_groups.end()) {		// not in map?
+	if (!g_talkgroups[tg] && bCreateIfNecessary) {
 
-		if (bCreateIfNecessary) {
+		g_talkgroups[tg] = new talkgroup;
 
-			log ("New talkgroup %d\n", tg);
-
-			talkgroup *g = new talkgroup;
-
-			g->tg = tg;
-
-			g_groups[tg] = g;
-		}
-
-		else
-			return NULL;
+		g_talkgroups[tg]->tg = tg;
 	}
 
-	return g_groups[tg];
+	return g_talkgroups[tg];
 }
 
 void _dump_groups(std::string &ret)
 {
 	char temp[200];
 
-	for (GROUPTREE_ITERATOR itr = g_groups.begin(); itr != g_groups.end(); itr++) {
+	for (int i=0; i < MAX_TALK_GROUPS; i++) {
 
-		talkgroup const *g = (*itr).second;
+		talkgroup const *g = g_talkgroups[i];
 
 		sprintf (temp, "TALKGROUP %d owner %d slot %d head %p %d\n", g->tg, NODEID(g->ownerslot), SLOT(g->ownerslot)+1, g->subscribers, g->subscribers ? g->subscribers->node->nodeid : 0);
 
@@ -840,27 +791,31 @@ void _dump_nodes(std::string &ret)
 
 	for (int ix=0; ix < HIGH_DMRID - LOW_DMRID; ix++) {
 
-		if (node_index[ix]) {
+		if (g_node_index[ix]) {
+
+			sprintf (temp, "Node vector %d, radioslot %d\n", ix + LOW_DMRID, g_node_index[ix]->radioslot);
+
+			ret += temp;
 
 			for (int essid=0; essid < 100; essid++) {
 
-				node const *n = node_index[ix]->sub[essid];
+				node const *n = g_node_index[ix]->sub[essid];
 
 				if (n) {
 
-					sprintf (temp, "%s ID %d auth %d sec %u\n", inet_ntoa(n->addr.sin_addr), n->nodeid, n->bAuth, n->hitsec);
+					sprintf (temp, "\t%s ID %d dmrid %d auth %d sec %u\n", inet_ntoa(n->addr.sin_addr), n->nodeid, n->dmrid, n->bAuth, n->hitsec);
 
 					ret += temp;
 
 					if (n->slots[0].tg) {
 
-						sprintf (temp, "  S1 TG %d\n", n->slots[0].tg);
+						sprintf (temp, "\t\tS1 TG %d\n", n->slots[0].tg);
 						ret += temp;
 					}
 
 					if (n->slots[1].tg) {
 						
-						sprintf (temp, "  S2 TG %d\n", n->slots[1].tg);
+						sprintf (temp, "\t\tS2 TG %d\n", n->slots[1].tg);
 						ret += temp;
 					}
 				}
@@ -949,11 +904,11 @@ void do_housekeeping()
 
 	for (int ix=0; ix < HIGH_DMRID - LOW_DMRID; ix++) {
 
-		if (node_index[ix]) {
+		if (g_node_index[ix]) {
 
 			for (int essid=0; essid < 100; essid++) {
 
-				node const *n = node_index[ix]->sub[essid];
+				node const *n = g_node_index[ix]->sub[essid];
 
 				if (n) {
 
@@ -972,39 +927,7 @@ void do_housekeeping()
 			}
 		}
 	}
-
-	// delete orphan radios
-
-	RADIOTREE_ITERATOR it = g_radios.begin(); 
 	
-	while (it != g_radios.end()) {
-
-		radio *r = (*it).second;
-
-		if (!findslot (r->slotid, false)) {
-
-			log ("Drop radio %d (node %d slot %d)\n", r->radioid, NODEID(r->slotid), SLOT(r->slotid)+1);
-
-			dropped_radios ++;
-
-			RADIOTREE_ITERATOR next = it;
-
-			next ++;
-
-			g_radios.erase (it);
-
-			it = next;
-
-			delete r;
-		}
-
-		else {
-
-			it ++;
-			radios ++;
-		}
-	}
-		
 	log ("Done - %u secs, %u active nodes, %u dropped nodes, %d radios, %d dropped radios, %u ticks\n", g_sec, active, dropped_nodes, radios, dropped_radios, g_tick - starttick);
 }
 
@@ -1084,14 +1007,16 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		slot *s = findslot (slotid, true);
 
+		if (!s)
+			return;
+
 		if (!s->node->bAuth)		// node hasn't been authenticated?
 			return;
 
 		s->node->addr = addr;	// update IP
 
-		radio *r = findradio (radioid, true);
-
-		r->slotid = slotid;
+		if (inrange(radioid,LOW_DMRID,HIGH_DMRID) && g_node_index[radioid-LOW_DMRID])
+			g_node_index[radioid-LOW_DMRID]->radioslot = slotid;
 
 		if (tg == UNSUBSCRIBE_ALL_TG) {		// unsubscribe only?
 
@@ -1101,7 +1026,7 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		if (flags & 0x40) {		// private call?
 
-			if (tg == r->radioid) {	// if to self, then this is a parrot
+			if (tg == radioid) {	// if to self, then this is a parrot
 
 				if (flags == 0xE2) {	// done?
 
@@ -1156,15 +1081,15 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 				unsubscribe_from_group (s);
 
-				radio *destradio = findradio (tg, false);
+				if (inrange(tg,LOW_DMRID,HIGH_DMRID) && g_node_index[tg-LOW_DMRID]) {
 
-				if (destradio) {
+					dword slotid = g_node_index[tg-LOW_DMRID]->radioslot;
 
-					slot *dest = findslot (destradio->slotid, false);
+					slot const *dest = findslot (slotid, false);
 
 					if (dest) {
 
-						if (SLOT(destradio->slotid))
+						if (SLOT(slotid))
 							pk[15] |= 0x80;
 
 						else
