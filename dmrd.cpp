@@ -13,9 +13,9 @@
     GNU General Public License for more details at 
 	https://www.gnu.org/licenses
 
-	Doesn't support repeaters yet. Loan me a Motorola or tell me how to remotely key up yours, and I'll get it working.
+	Doesn't support repeaters yet. Loan me a Motorola and I'll get it working.
 
-	This code assumes a small-endian CPU and 32-bit compiler. Shouldn't be hard to make this work on 64-bit.
+	This code assumes 32-bit compiler. Should work on 64-bit but I haven't tested it.
 	
 	This has been built and tested on GNU C++ on Centos Linux (Intel 32-bit) and Visual C++ 6.0 for Windows.
 
@@ -37,12 +37,16 @@
 				private call optimized
 				version 0.17
 
+	05-24-2020	more logging.
+				
+				version 0.18.
+
 */
 
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 17
+#define RELEASE 19
 
 //#define BIG_ENDIAN_CPU
 #define LOW_DMRID 1000000			/* lowest acceptible DMR ID not including ESSID */
@@ -53,7 +57,7 @@
 #define SCANNER_TG 777				/* when radios connect to this, they head the 'scanner' */
 #define UNSUBSCRIBE_ALL_TG 4000
 #define MAX_PASSWORD_SIZE 120
-#define DEFAULT_HOUSEKEEPING_MINUTES 5
+#define DEFAULT_HOUSEKEEPING_MINUTES 1
 #define DEFAULT_PORT 62031
 
 #define NODEID(SLOTID) ((SLOTID) & 0x7FFFFFFF)						/* strip off slot bit */
@@ -67,6 +71,8 @@ char g_password[MAX_PASSWORD_SIZE];
 int g_housekeeping_minutes = DEFAULT_HOUSEKEEPING_MINUTES;
 dword volatile g_tick;		// ticks since server started, this will rollover
 dword volatile g_sec;		// seconds since server started
+
+#define inet_ntoa __use_my_inet_ntoa__
 
 struct slot
 {
@@ -155,6 +161,42 @@ talkgroup *g_talkgroups[MAX_TALK_GROUPS];
 talkgroup *g_scanner;		// the scanner TG
 
 //////////////////////////////////////////////////////////////////////////////////////////
+
+std::string my_inet_ntoa (in_addr in)
+{
+	char buf[20];
+
+	dword n = *(dword*)&in;
+
+	sprintf (buf, "%03d.%03d.%03d.%03d", 
+		(byte)(n),
+		(byte)(n >> 8),
+		(byte)(n >> 16),
+		(byte)(n >> 24));
+
+	return buf;
+}
+
+std::string slotid_str (dword slotid)
+{
+	char buf[20];
+
+	sprintf (buf, "%u:%u", NODEID(slotid), SLOT(slotid)+1);
+
+	return buf;
+}
+
+void dumphex (PCSTR pName, void const *p, int nSize)
+{
+	printf ("%s: ", pName);
+
+	for (int i=0; i < nSize; i++) {
+
+		printf ("%02X", ((BYTE*)p)[i]);
+	}
+
+	putchar ('\n');
+}
 
 bool select_rx (int sock, int wait_secs)
 {
@@ -449,8 +491,8 @@ PCSTR skipspaces (PCSTR p, bool bSkipTabs, bool bSkipCtrl)
 static void _init_process() 
 {
 	assert(sizeof(WORD) == 2);
-	assert(sizeof(DWORD) == 4);
 	assert(sizeof(word) == 2);
+	assert(sizeof(DWORD) == 4);
 	assert(sizeof(dword) == 4);
 	assert(sizeof(u64) == 8);
 	setbuf(stdout,NULL);
@@ -482,7 +524,7 @@ void init_process()
 
 void unsubscribe_from_group(slot *s);
 
-void log (PCSTR fmt, ...)
+void log (sockaddr_in *addr, PCSTR fmt, ...)
 {
 	int err = errno;
 	
@@ -500,7 +542,7 @@ void log (PCSTR fmt, ...)
 
 		tm *t = localtime(&tt);
 
-		sprintf (temp, "%02d-%02d-%02d %02d:%02d:%02d ", t->tm_mon+1, t->tm_mday, t->tm_year % 100, t->tm_hour, t->tm_min, t->tm_sec);
+		sprintf (temp, "%02d-%02d-%02d %02d:%02d:%02d %-15s ", t->tm_mon+1, t->tm_mday, t->tm_year % 100, t->tm_hour, t->tm_min, t->tm_sec, addr ? my_inet_ntoa(addr->sin_addr).c_str() : "000.000.000.000");
 
 		vsprintf (temp + strlen(temp), fmt, marker);
 
@@ -603,7 +645,7 @@ void show_packet (PCSTR title, char const *ip, byte const *pk, int sz, bool bSho
 
 void sendpacket (sockaddr_in addr, void const *p, int sz)
 {
-	show_packet ("TX", inet_ntoa(addr.sin_addr), (byte const*)p, sz, true);
+	show_packet ("TX", my_inet_ntoa(addr.sin_addr).c_str(), (byte const*)p, sz, true);
 
 	sendto (g_sock, (char*)p, sz, 0, (sockaddr*)&addr, sizeof(addr));
 }
@@ -654,8 +696,6 @@ node * findnode (dword nodeid, bool bCreateIfNecessary)
 		n = g_node_index[ix]->sub[essid];
 	}
 
-	n->hitsec = g_sec;
-
 	return n;
 }
 
@@ -689,13 +729,11 @@ void delete_node (dword nodeid)
 
 			if (n) {
 
-				log ("Delete node %d\n", nodeid);
+				log (&n->addr, "Delete node %d\n", nodeid);
 
 				unsubscribe_from_group (&n->slots[0]);
 
 				unsubscribe_from_group (&n->slots[1]);
-
-				delete n;
 
 				g_node_index[ix]->sub[essid] = NULL;
 
@@ -716,6 +754,8 @@ void delete_node (dword nodeid)
 					
 					g_node_index[ix] = NULL;
 				}
+
+				delete n;
 			}
 		}
 	}
@@ -803,7 +843,7 @@ void _dump_nodes(std::string &ret)
 
 				if (n) {
 
-					sprintf (temp, "\t%s ID %d dmrid %d auth %d sec %u\n", inet_ntoa(n->addr.sin_addr), n->nodeid, n->dmrid, n->bAuth, n->hitsec);
+					sprintf (temp, "\t%s ID %d dmrid %d auth %d sec %u\n", my_inet_ntoa(n->addr.sin_addr).c_str(), n->nodeid, n->dmrid, n->bAuth, n->hitsec);
 
 					ret += temp;
 
@@ -838,7 +878,7 @@ void unsubscribe_from_group(slot *s)
 {
 	if (s->tg) {
 
-		log ("Unsubscribe node %d slot %d from talkgroup %d\n", s->node->nodeid, SLOT(s->slotid)+1, s->tg);
+		log (&s->node->addr, "Unsubscribe node %d slot %d from talkgroup %d\n", s->node->nodeid, SLOT(s->slotid)+1, s->tg);
 
 		talkgroup *g = findgroup (s->tg, false);
 
@@ -871,7 +911,7 @@ void subscribe_to_group(slot *s, talkgroup *g)
 {
 	if (s->tg != g->tg) {
 
-		log ("Subscribe node %d %s slot %d to talkgroup %d\n", s->node->nodeid, inet_ntoa(s->node->addr.sin_addr), SLOT(s->slotid)+1, g->tg);
+		log (&s->node->addr, "Subscribe node %d slot %d to talkgroup %d\n", s->node->nodeid, SLOT(s->slotid)+1, g->tg);
 
 		unsubscribe_from_group(s);
 			
@@ -896,7 +936,7 @@ void do_housekeeping()
 
 	dword starttick = g_tick;
 
-	log ("Housekeeping, tick %u\n", starttick);
+	log (NULL, "Housekeeping, tick %u\n", starttick);
 
 	// delete any inactive nodes 
 
@@ -928,7 +968,7 @@ void do_housekeeping()
 		}
 	}
 	
-	log ("Done - %u secs, %u active nodes, %u dropped nodes, %d radios, %d dropped radios, %u ticks\n", g_sec, active, dropped_nodes, radios, dropped_radios, g_tick - starttick);
+	log (NULL, "Done - %u secs, %u active nodes, %u dropped nodes, %d radios, %d dropped radios, %u ticks\n", g_sec, active, dropped_nodes, radios, dropped_radios, g_tick - starttick);
 }
 
 void swapbytes (byte *a, byte *b, int sz)
@@ -1000,6 +1040,8 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		bool const bEndStream = (flags & 0x23) == 0x22;
 
+		bool const bPrivateCall = (flags & 0x40) == 0x40;
+
 		dword const slotid = SLOTID(nodeid, flags & 0x80);
 
 		if (g_debug)
@@ -1007,28 +1049,45 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		slot *s = findslot (slotid, true);
 
-		if (!s)
-			return;
+		if (!s) {
 
-		if (!s->node->bAuth)		// node hasn't been authenticated?
+			log (&addr, "Slotid %s not found for DMRD\n", slotid_str(slotid).c_str());
 			return;
+		}
+
+		if (!s->node->bAuth) {		// node hasn't been authenticated?
+
+			log (&addr, "Node %d not authenticated for DMRD\n", nodeid);
+			return;
+		}
+
+		if (getinaddr(s->node->addr) != getinaddr(addr)) {	// coming from a bogus IP?
+
+			log (&addr, "Node %d invalid IP DMRD. Should be %s\n", nodeid, my_inet_ntoa(addr.sin_addr).c_str());
+			return;
+		}
 
 		s->node->addr = addr;	// update IP
+
+		s->node->hitsec = g_sec;
 
 		if (inrange(radioid,LOW_DMRID,HIGH_DMRID) && g_node_index[radioid-LOW_DMRID])
 			g_node_index[radioid-LOW_DMRID]->radioslot = slotid;
 
 		if (tg == UNSUBSCRIBE_ALL_TG) {		// unsubscribe only?
 
+			log (&addr, "Unsubscribe all, slotid %s\n", slotid_str(slotid).c_str());
 			unsubscribe_from_group (s);
 			return;
 		}
 
-		if (flags & 0x40) {		// private call?
+		if (bPrivateCall) {		// private call?
 
 			if (tg == radioid) {	// if to self, then this is a parrot
 
-				if (flags == 0xE2) {	// done?
+				if (bEndStream) {	// done?
+
+					log (&addr, "Parrot stream end on nodeid %u slotid %s radioid %u\n", nodeid, slotid_str(slotid).c_str(), radioid);
 
 					// is the parrot really running?
 
@@ -1052,7 +1111,9 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 				else {
 
-					if (flags == 0xE1) {	// start parrot?
+					if (bStartStream) {	// start parrot?
+
+						log (&addr, "Parrot stream start on nodeid %u slotid %s radioid %u\n", nodeid, slotid_str(slotid).c_str(), radioid);
 
 						unsubscribe_from_group (s);
 
@@ -1081,21 +1142,63 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 				unsubscribe_from_group (s);
 
-				if (inrange(tg,LOW_DMRID,HIGH_DMRID) && g_node_index[tg-LOW_DMRID]) {
+				if (bStartStream) {
 
-					dword slotid = g_node_index[tg-LOW_DMRID]->radioslot;
+					log (&addr, "Private stream start, from radioid %u to radioid %u\n", radioid, tg);
+				}
 
-					slot const *dest = findslot (slotid, false);
+				else if (bEndStream) {
 
-					if (dest) {
+					log (&addr, "Private stream end, from radioid %u to radioid %u\n", radioid, tg);
+				}
 
-						if (SLOT(slotid))
-							pk[15] |= 0x80;
+				if (inrange(tg,LOW_DMRID,HIGH_DMRID)) {
+				
+					if (g_node_index[tg-LOW_DMRID]) {
 
-						else
-							pk[15] &= 0x7F;
+						dword slotid = g_node_index[tg-LOW_DMRID]->radioslot;
 
-						sendpacket (dest->node->addr, pk, pksize);
+						slot const *dest = findslot (slotid, false);
+
+						if (dest) {
+
+							if (bStartStream || bEndStream) {
+
+								log (&addr, "Private stream dest slotid %s found, from radioid %u to radioid %u\n", slotid_str(slotid).c_str(), radioid, tg);
+							}
+
+							if (SLOT(slotid))
+								pk[15] |= 0x80;
+
+							else
+								pk[15] &= 0x7F;
+
+							sendpacket (dest->node->addr, pk, pksize);
+						}
+
+						else {
+
+							if (bStartStream || bEndStream) {
+
+								log (&addr, "Private stream dest slotid %s not found, from radioid %u to radioid %u\n", slotid_str(slotid).c_str(), radioid, tg);
+							}
+						}
+					}
+
+					else {
+
+						if (bStartStream || bEndStream) {
+
+							log (&addr, "Private stream dest radioid not in node index, from radioid %u to radioid %u\n", radioid, tg);
+						}
+					}
+				}
+
+				else {
+
+					if (bStartStream || bEndStream) {
+
+						log (&addr, "Private stream dest radioid out of range, from radioid %u to radioid %u\n", radioid, tg);
 					}
 				}
 			}
@@ -1116,7 +1219,12 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 				if (tg != SCANNER_TG && (!g->ownerslot || g->ownerslot == slotid || (g_tick - g->tick >= 1500) ) ) {
 
-					g->ownerslot = slotid;
+					if (g->ownerslot != slotid) {
+
+						log (&addr, "Take group %u, nodeid %u slotid %s radioid %u", tg, nodeid, slotid_str(slotid).c_str(), radioid);
+							
+						g->ownerslot = slotid;
+					}
 					
 					g->tick = g_tick;
 
@@ -1185,11 +1293,34 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		dword nodeid = get4(pk + 4);
 
-		node *n = findnode (nodeid, true);	// this will hit the time
+		log (&addr, "RPTL node %d\n", nodeid);
+
+		node *n = findnode (nodeid, false);
+
+		if (n) {		// node exists?
+
+			// if already authenticated at a different IP then reject
+
+			if (n->bAuth && getinaddr(addr) != getinaddr(n->addr)) {
+
+				log (&addr, "Node %d already logged in at %s\n", nodeid, my_inet_ntoa(n->addr.sin_addr).c_str());
+				return;
+			}
+		}
+
+		if (!n) {
+
+			n = findnode (nodeid, true);
+		}
+
+		n->hitsec = g_sec;
+
+		if (!getinaddr(n->addr)) {
+
+			n->addr = addr;
+		}
 
 		n->salt = ((dword)rand() << 16) ^ g_tick;	// reasonably random salt for RPTK authentication
-
-		n->addr = addr;
 
 		memcpy (pk, "RPTACK", 6);
 
@@ -1202,9 +1333,23 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		dword nodeid = get4(pk + 4);
 
-		node *n = findnode(nodeid, true);
+		log (&addr, "RPTK node %d\n", nodeid);
 
-		n->addr = addr;
+		node *n = findnode(nodeid, false);
+
+		if (!n) {
+
+			log (&addr, "Node %d not found for RPTK", nodeid);
+			return;
+		}
+
+		if (getinaddr(n->addr) != getinaddr(addr)) {
+
+			log (&addr, "Invalid RPTK IP address for node %d, should be %s\n", nodeid, my_inet_ntoa(n->addr.sin_addr).c_str());
+			return;
+		}
+
+		n->hitsec = g_sec;
 
 		if (!n->bAuth) {
 
@@ -1223,10 +1368,15 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 			if (memcmp(localhash, remotehash, 32)==0) {
 
 				n->bAuth = true;
+
+				n->addr = addr;
 			}
 		}
 
 		memcpy (pk, n->bAuth ? "RPTACK" : "MSTNAK", 6);
+
+		if (!n->bAuth)
+			log (&addr, "Authentication failed");
 
 		set4 (pk + 6, nodeid);
 
@@ -1237,10 +1387,26 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		dword nodeid = get4(pk + 4);
 
+		log (&addr, "RPTC node %d\n", nodeid);
+
+		node *n = findnode (nodeid, false);
+
+		if (!n) {
+
+			log (&addr, "Node %d not found for RPTC", nodeid);
+			return;
+		}
+
+		if (getinaddr(n->addr) != getinaddr(addr)) {
+
+			log (&addr, "Invalid RPTC IP address for node %d, should be %s\n", nodeid, my_inet_ntoa(n->addr.sin_addr).c_str());
+			return;
+		}
+
+		n->hitsec = g_sec;
+
 		memcpy (pk, "RPTACK", 6);
-
 		set4(pk + 6, nodeid);
-
 		sendpacket (addr, pk, 10);
 	}
 
@@ -1248,23 +1414,21 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		dword nodeid = get4(pk + 7);
 
-		node *n = findnode (nodeid, false);	// this will hit the time
+		node *n = findnode (nodeid, false);
 
-		if (n) 
-			n->addr = addr;
+		if (n && n->bAuth && getinaddr(addr) == getinaddr(n->addr)) {
 
-		if (!n || !n->bAuth) {
-
-			memcpy (pk, "MSTNAK", 6);
-			set4 (pk+6, nodeid);
-			sendpacket (addr, pk, 10);
+			n->hitsec = g_sec;
+			memcpy (pk, "MSTPONG", 7);
+			set4 (pk+7, nodeid);
+			sendpacket (addr, pk, 11);
 		}
 
 		else {
 
-			memcpy (pk, "MSTPONG", 7);
-			set4 (pk+7, nodeid);
-			sendpacket (addr, pk, 11);
+			memcpy (pk, "MSTNAK", 6);
+			set4 (pk+6, nodeid);
+			sendpacket (addr, pk, 10);
 		}
 	}
 
@@ -1272,7 +1436,25 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		dword nodeid = get4(pk + 5);
 
-		delete_node (nodeid);
+		log (&addr, "RPTCL node %d\n", nodeid);
+
+		node *n = findnode (nodeid, false);
+
+		if (!n) {
+
+			log (&addr, "Node %d doesn't exist for RPTCL", nodeid);
+			return;
+		}
+
+		if (getinaddr(addr) == getinaddr(n->addr)) {
+	
+			delete_node (nodeid);
+		}
+
+		else {
+
+			log (&addr, "Invalid RPTCL IP address for node %d, should be %s\n", nodeid, my_inet_ntoa(n->addr.sin_addr).c_str());
+		}
 	}
 
 	else if (pksize >= 5 && memcmp(pk, "/STAT", 5)==0) {		// return status to local query
@@ -1315,7 +1497,7 @@ void run ()
 
 				char ip[50];
 				
-				strcpy (ip, inet_ntoa (addr.sin_addr));
+				strcpy (ip, my_inet_ntoa (addr.sin_addr).c_str());
 
 				if (g_debug) {
 
@@ -1333,7 +1515,7 @@ void run ()
 
 				int err = GetInetError ();
 
-				log ("recvfrom error %d\n", err);
+				log (&addr, "recvfrom error %d\n", err);
 
 				Sleep (50);
 			}
@@ -1356,7 +1538,7 @@ bool show_running_status()
 
 	if ((sock = open_udp(62111)) == -1) {
 
-		log ("Failed to open UDP port (%d)\n", GetInetError());
+		log (NULL, "Failed to open UDP port (%d)\n", GetInetError());
 		return 1;
 	}
 
@@ -1446,6 +1628,7 @@ int main(int argc, char **argv)
 	if (IsOptionPresent(argc,argv,"-s"))		// show running server's status, then exit?
 		return !show_running_status () ? 0 : 1;
 
+#if 0
 	puts ("This program is free software: you can redistribute it and/or modify");
     puts ("it under the terms of the GNU General Public License as published by");
     puts ("the Free Software Foundation, version 3 of the License.\n");
@@ -1455,6 +1638,7 @@ int main(int argc, char **argv)
     puts ("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the");
     puts ("GNU General Public License for more details at");
 	puts ("https://www.gnu.org/licenses\n");
+#endif
 
 	// make the talkgroups
 
@@ -1467,7 +1651,7 @@ int main(int argc, char **argv)
 
 	if ((g_sock = open_udp(g_udp_port)) == -1) {
 
-		log ("Failed to open UDP port (%d)\n", GetInetError());
+		log (NULL, "Failed to open UDP port (%d)\n", GetInetError());
 		return 1;
 	}
 
