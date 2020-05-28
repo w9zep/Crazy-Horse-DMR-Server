@@ -13,8 +13,6 @@
     GNU General Public License for more details at 
 	https://www.gnu.org/licenses
 
-	Doesn't support repeaters yet. Loan me a Motorola and I'll get it working.
-
 	This code assumes 32-bit compiler. Should work on 64-bit but I haven't tested it.
 	
 	This has been built and tested on GNU C++ on Centos Linux (Intel 32-bit) and Visual C++ 6.0 for Windows.
@@ -38,8 +36,10 @@
 				version 0.17
 
 	05-24-2020	more logging.
-				
 				version 0.18.
+
+	06-28-2020	fixed bug in do_housekeeping()
+				version 0.20
 
 */
 
@@ -878,7 +878,7 @@ void unsubscribe_from_group(slot *s)
 {
 	if (s->tg) {
 
-		log (&s->node->addr, "Unsubscribe node %d slot %d from talkgroup %d\n", s->node->nodeid, SLOT(s->slotid)+1, s->tg);
+		log (&s->node->addr, "Unsubscribe group %u node %d slot %d from talkgroup %d\n", s->tg, s->node->nodeid, SLOT(s->slotid)+1);
 
 		talkgroup *g = findgroup (s->tg, false);
 
@@ -911,7 +911,7 @@ void subscribe_to_group(slot *s, talkgroup *g)
 {
 	if (s->tg != g->tg) {
 
-		log (&s->node->addr, "Subscribe node %d slot %d to talkgroup %d\n", s->node->nodeid, SLOT(s->slotid)+1, g->tg);
+		log (&s->node->addr, "Subscribe group %u node %d slot %d to talkgroup %d\n", g->tg, s->node->nodeid, SLOT(s->slotid)+1);
 
 		unsubscribe_from_group(s);
 			
@@ -1073,8 +1073,12 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 
 		if (tg == UNSUBSCRIBE_ALL_TG) {		// unsubscribe only?
 
-			log (&addr, "Unsubscribe all, slotid %s\n", slotid_str(slotid).c_str());
-			unsubscribe_from_group (s);
+			if (bStartStream) {
+
+				log (&addr, "Unsubscribe all, slotid %s\n", slotid_str(slotid).c_str());
+				unsubscribe_from_group (s);
+			}
+
 			return;
 		}
 
@@ -1212,48 +1216,82 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 					subscribe_to_group(s, g);
 				}
 
-				// If this is group owner, or group has no owner, or owner timed out, take group and distribute packet
+				if (tg != SCANNER_TG) {
 
-				if (tg != SCANNER_TG && (!g->ownerslot || g->ownerslot == slotid || (g_tick - g->tick >= 1500) ) ) {
+					if (g->ownerslot && g_tick - g->tick >= 1500) {	// current group owner timed out?
 
-					if (g->ownerslot != slotid) {
+						log (&addr, "Timeout group %u, slotid %s", tg, slotid_str(g->ownerslot).c_str());
+
+						g->ownerslot = 0;
+					}
+
+					if (bStartStream && !g->ownerslot) {
 
 						log (&addr, "Take group %u, nodeid %u slotid %s radioid %u", tg, nodeid, slotid_str(slotid).c_str(), radioid);
 							
 						g->ownerslot = slotid;
+
+						g->tick = g_tick;
+					}
+
+					else if (bEndStream && g->ownerslot == slotid) {
+
+						log (&addr, "Drop group %u, nodeid %u slotid %s radioid %u", tg, nodeid, slotid_str(slotid).c_str(), radioid);
+
+						g->ownerslot = 0;
 					}
 					
-					g->tick = g_tick;
+					if (slotid == g->ownerslot) {
 
-					// relay packet to subscribers
+						g->tick = g_tick;
 
-					slot const *dest = g->subscribers;
+						// relay packet to subscribers
 
-					while (dest) {
+						slot const *dest = g->subscribers;
 
-						if (dest->slotid != slotid) {	// don't send packet back to sender
+						while (dest) {
 
-							if (SLOT(dest->slotid))
-								pk[15] |= 0x80;
+							if (dest->slotid != slotid) {	// don't send packet back to sender
 
-							else
-								pk[15] &= 0x7F;
+								if (SLOT(dest->slotid))
+									pk[15] |= 0x80;
 
-							sendpacket (dest->node->addr, pk, pksize);
+								else
+									pk[15] &= 0x7F;
+
+								sendpacket (dest->node->addr, pk, pksize);
+							}
+
+							dest = dest->next;
 						}
+					}
 
-						dest = dest->next;
+					if (g_scanner->ownerslot && g_tick - g_scanner->tick >= 1500) {
+
+						log (&addr, "Timeout scanner, nodeid %u slotid %s radioid %u", nodeid, slotid_str(slotid).c_str(), radioid);
+
+						g_scanner->ownerslot = 0;
 					}
 
 					// if slot owns scanner and end of stream, or owner timed out, drop ownership
 
-					if ((s->slotid == g_scanner->ownerslot && bEndStream) || (g_tick - g_scanner->tick >= 1500))
+					if (s->slotid == g_scanner->ownerslot && bEndStream) {
+
+						log (&addr, "Drop scanner, nodeid %u slotid %s radioid %u", nodeid, slotid_str(slotid).c_str(), radioid);
+
 						g_scanner->ownerslot = 0;
+					}
 
 					// if nobody owns the scanner, and this isn't the end of a stream, take tx ownership
 
-					if (!g_scanner->ownerslot && !bEndStream)
+					if (!g_scanner->ownerslot && !bEndStream) {
+
+						log (&addr, "Take scanner, nodeid %u slotid %s radioid %u", nodeid, slotid_str(slotid).c_str(), radioid);
+
 						g_scanner->ownerslot = s->slotid;
+
+						g_scanner->tick = g_tick;
+					}
 
 					// if current slot is current scanner stream, relay the packet to scanner subscribers
 
