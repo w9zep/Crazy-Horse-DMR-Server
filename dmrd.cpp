@@ -46,7 +46,7 @@
 #include "dmrd.h"
 
 #define VERSION 0
-#define RELEASE 19
+#define RELEASE 20
 
 //#define BIG_ENDIAN_CPU
 #define LOW_DMRID 1000000			/* lowest acceptible DMR ID not including ESSID */
@@ -944,25 +944,22 @@ void do_housekeeping()
 
 	for (int ix=0; ix < HIGH_DMRID - LOW_DMRID; ix++) {
 
-		if (g_node_index[ix]) {
+		for (int essid=0; g_node_index[ix] && essid < 100; essid++) {	// since g_node_index[ix] can go NULL in delete_node() we have to keep checking it every iteration
 
-			for (int essid=0; essid < 100; essid++) {
+			node const *n = g_node_index[ix]->sub[essid];
 
-				node const *n = g_node_index[ix]->sub[essid];
+			if (n) {
 
-				if (n) {
+				if (g_sec - n->hitsec >= 60) {		// node must at least ping once a minute
 
-					if (g_sec - n->hitsec >= 60) {		// node must at least ping once a minute
+					dropped_nodes ++;
 
-						dropped_nodes ++;
+					delete_node (n->nodeid);
+				}
 
-						delete_node (n->nodeid);
-					}
+				else {
 
-					else {
-
-						active ++;
-					}
+					active ++;
 				}
 			}
 		}
@@ -1283,6 +1280,9 @@ void handle_rx (sockaddr_in &addr, byte *pk, int pksize)
 			}
 
 			else {
+
+				if (bStartStream)
+					log (&addr, "Nodeid %u keyup on non-existent group %u", nodeid, tg);
 
 				unsubscribe_from_group (s);
 			}
